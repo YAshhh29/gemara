@@ -74,9 +74,11 @@ genopenapi:
 # Repo whose releases hold the v1 baseline OpenAPI asset.
 REPO ?= gemaraproj/gemara
 
+# The tag filter matches the dot as [.] rather than \\. because native Windows
+# make drops one of the backslashes when passing a quoted recipe to sh.
 breaking-check:
 	@echo "  >  Checking for breaking schema changes ..."
-	@filter='.[] | select(.prerelease == false) | select(.tag_name | test("^v1\\.")) | select(any(.assets[]?; .name == "openapi.yaml")) | .tag_name'; \
+	@filter='.[] | select(.prerelease == false) | select(.tag_name | test("^v1[.]")) | select(any(.assets[]?; .name == "openapi.yaml")) | .tag_name'; \
 	tags=$$(gh api "repos/$(REPO)/releases" --paginate --jq "$$filter") \
 		|| { echo "  >  ERROR: failed to query releases from $(REPO); aborting breaking-change check" >&2; exit 1; }; \
 	tag=$$(printf '%s\n' "$$tags" | sort -V | tail -n1); \
