@@ -74,8 +74,8 @@ genopenapi:
 # Repo whose releases hold the v1 baseline OpenAPI asset.
 REPO ?= gemaraproj/gemara
 
-# The tag filter matches the dot as [.] rather than \\. because native Windows
-# make drops one of the backslashes when passing a quoted recipe to sh.
+# The tag filter matches the dot as [.] rather than \\. because on Windows,
+# Git Bash's sh drops one backslash from the recipe make hands it (see #527).
 breaking-check:
 	@echo "  >  Checking for breaking schema changes ..."
 	@filter='.[] | select(.prerelease == false) | select(.tag_name | test("^v1[.]")) | select(any(.assets[]?; .name == "openapi.yaml")) | .tag_name'; \
