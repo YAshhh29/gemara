@@ -42,7 +42,7 @@ Adding a new artifact type requires schema changes, test data, and documentation
 |:---------|:----------------------------------------------------------------------------------------------|
 | 1        | Define the new `#YourArtifact` definition in its own `yourartifact.cue` file with a file-level `@gemara(status="…")` attribute (see [Projection directives](#projection-directives)) |
 | 2        | Add `"YourArtifact"` to the `#ArtifactType` enum in `metadata.cue`                            |
-| 3        | Add an entry for the new file, with its enum and alias types, to `schema-nav.yml` in the [website repo](https://github.com/gemaraproj/website) under the correct layer |
+| 3        | Add an entry for the new file to `schema-nav.yml` in the [website repo](https://github.com/gemaraproj/website), listing the artifact and every struct, enum, and alias it adds (unlisted definitions get no docs page), with a `layer:` value where applicable |
 | 4        | Create a valid test data file in `test/test-data/` (prefix with `good-`)                      |
 | 5        | Add positive and/or negative test cases to `test/schema_test.go`                              |
 | 6        | Run `cue vet -d '#YourArtifact' . test/test-data/good-your-artifact.yaml` to validate locally |
