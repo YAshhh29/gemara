@@ -22,6 +22,11 @@ func (c *Converter) Post() error {
 	if err := inclusiveRequiredDisjunctionsTyped(doc); err != nil {
 		return err
 	}
+	// Before the collapse: references to a helper are the only record of
+	// where its rules apply.
+	if err := c.applyHelperRules(doc); err != nil {
+		return err
+	}
 	// Order matters from here: collapseHelperSchemas rewrites `$ref` in place,
 	// and restoreRefDescriptions moves a `$ref` inside an `allOf` where that
 	// rewrite no longer reaches it. Collapsing second would leave dangling

@@ -28,6 +28,7 @@ package gemara
 		requirement: "reference-id": (control."reference-id")
 	}]
 	// Require start timestamp on assessments that actually executed
+
 	"assessment-logs": [#_AssessmentLogStrict, ...#_AssessmentLogStrict]
 }
 

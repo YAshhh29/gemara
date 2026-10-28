@@ -229,6 +229,11 @@ components:
           items:
             allOf:
             - $ref: "#/components/schemas/Evidence"
+            - anyOf:
+              - required:
+                - payload
+              - required:
+                - source
             type: object
           minItems: 1
           type: array
@@ -434,6 +439,11 @@ components:
           items:
             allOf:
             - $ref: "#/components/schemas/Evidence"
+            - anyOf:
+              - required:
+                - payload
+              - required:
+                - source
             type: object
           minItems: 1
           type: array
@@ -707,15 +717,22 @@ components:
             Enforce that control reference and the assessments' references match
             This formulation uses the control's reference if the assessment doesn't include a reference
             
-            
-            Require start timestamp on assessments that actually executed
-            
             (Enforced by the CUE schema; not by this OpenAPI projection.)
           items:
             allOf:
             - $ref: "#/components/schemas/AssessmentLog"
             - required:
               - requirement
+            - anyOf:
+              - properties:
+                  result:
+                    enum:
+                    - Not Run
+                    - Unknown
+                    - Not Applicable
+                    type: string
+              - required:
+                - start
             properties:
               requirement:
                 properties:
@@ -1422,7 +1439,16 @@ components:
         mappings:
           description: mappings is one or more atomic relationships between entries in the referenced artifacts
           items:
-            $ref: "#/components/schemas/Mapping"
+            allOf:
+            - $ref: "#/components/schemas/Mapping"
+            - anyOf:
+              - properties:
+                  relationship:
+                    enum:
+                    - no-match
+                    type: string
+              - required:
+                - targets
           minItems: 1
           type: array
         metadata:
