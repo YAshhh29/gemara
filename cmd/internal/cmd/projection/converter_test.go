@@ -75,16 +75,10 @@ func enumOf(t *testing.T, schemas map[string]any, name string) []string {
 	return out
 }
 
-// requireRef asserts a hidden helper reference was collapsed to its named
-// base, either directly or as the first allOf branch beside the helper's
-// projected rules.
+// requireRef asserts a hidden helper reference was collapsed to its named base.
 func requireRef(t *testing.T, items map[string]any, wantRef, label string) {
 	t.Helper()
-	ref, _ := items["$ref"].(string)
-	if branches := sliceOf(items["allOf"]); ref == "" && len(branches) > 0 {
-		ref, _ = mapOf(branches[0])["$ref"].(string)
-	}
-	if ref != wantRef {
+	if ref, _ := items["$ref"].(string); ref != wantRef {
 		t.Errorf("%s items.$ref = %q, want %q", label, ref, wantRef)
 	}
 }
@@ -119,7 +113,7 @@ func TestConverter(t *testing.T) {
 
 	// Refs to a hidden definition resolve to their visible base type
 	// (#_MappingStrict -> Mapping, mappingdocument.cue), not merely to
-	// something non-hidden. The helper's rule travels beside the reference;
+	// something non-hidden. The helper's rule is projected onto the base;
 	// helperrules_test.go covers that.
 	mappings, ok := mapOf(mapOf(schemas["MappingDocument"])["properties"])["mappings"].(map[string]any)
 	if !ok {
@@ -127,8 +121,8 @@ func TestConverter(t *testing.T) {
 	}
 	requireRef(t, mapOf(mappings["items"]), "#/components/schemas/Mapping", "MappingDocument.mappings")
 
-	// The at-least-one Evidence rule is projected where #_EvidenceStrict is
-	// used, and the hidden helper must not leak.
+	// The at-least-one Evidence rule is projected onto Evidence;
+	// helperrules_test.go covers that. Here the hidden helper must not leak.
 	evidence, ok := mapOf(mapOf(schemas["AssessmentLog"])["properties"])["evidence"].(map[string]any)
 	if !ok {
 		t.Fatalf("AssessmentLog.evidence missing: %v", schemas["AssessmentLog"])

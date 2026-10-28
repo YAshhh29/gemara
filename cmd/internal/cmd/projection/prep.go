@@ -46,7 +46,8 @@ type prepInfo struct {
 	// CUE CONVERTER WORKAROUND: HelperRules holds the conditionals of hidden #_
 	// helpers (such as #_AssessmentLogStrict) that stripComprehensions
 	// translated instead of dropping, keyed by helper name without the leading
-	// '#'. Post attaches each rule wherever its helper is referenced.
+	// '#'. Post attaches each rule to the base schema the helper extends, which
+	// every use of the helper is collapsed onto.
 	HelperRules map[string][]helperRule
 }
 

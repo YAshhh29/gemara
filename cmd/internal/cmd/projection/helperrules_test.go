@@ -44,11 +44,15 @@ func TestPrepareTranslatesHelperConditionals(t *testing.T) {
 		{name: "two body fields", conditional: `if k != "x" { f: #T, l: [#T, ...#T] }`},
 		{name: "narrowing body", conditional: `if k != "x" { f: "fixed" }`},
 		{name: "two subjects", conditional: `if k != "x" && a != "y" { f: #T }`},
+		{name: "present subject", conditional: `if a != _|_ { f: #T }`},
+		{name: "or chain", conditional: `if k != "x" || k != "y" { f: #T }`},
+		{name: "mismatched list tail", conditional: `if k != "x" { l: [#T, ...#U] }`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			_, info := mustPrepare(t, `package p
 #T: string
+#U: string
 #B: {k: string, a?: string, f?: #T, l?: [#T, ...#T]}
 #_BStrict: {
 	@go(-)
@@ -134,7 +138,7 @@ package p
 
 #Datetime: string
 #Ref: {id: string}
-#Result: "Passed" | "Failed" | "Not Run"
+#Result: "Passed" | "Failed" | "Not Run" | "Unknown"
 
 #Log: {
 	result:   #Result
@@ -148,7 +152,7 @@ package p
 } & #Log & {
 	result:   #Result
 	payload?: _
-	if result != "Not Run" {
+	if result != "Not Run" && result != "Unknown" {
 		start: #Datetime
 	}
 	if payload == _|_ {
@@ -175,53 +179,65 @@ package p
 #Doc: {
 	logs?:  [#_LogStrict, ...#_LogStrict]
 	pairs?: [#_PairStrict, ...#_PairStrict]
-	plain?: [#Log, ...#Log]
 }
 `
 
-// The projected rules must accept exactly what the CUE accepts: each case is
-// checked against both, so a mismatch in either direction fails.
+// The projected rules must accept exactly what the CUE accepts: each entry is
+// checked against both, on its own and inside a document, so a mismatch in
+// either direction fails. On its own, the base schema must agree with the
+// helper, because the helper's rules are the base type's real rules.
 func TestHelperRulesMatchTheCUE(t *testing.T) {
 	doc, err := convertSource(t, helperRuleSchema)
 	if err != nil {
 		t.Fatal(err)
 	}
-	schema := reloaded(t, doc).Components.Schemas["Doc"]
-	if schema == nil {
-		t.Fatal("Doc is missing from the generated document")
-	}
+	schemas := reloaded(t, doc).Components.Schemas
 	ctx := cuecontext.New()
-	def := ctx.CompileString(helperRuleSchema).LookupPath(cue.ParsePath("#Doc"))
-	if err := def.Err(); err != nil {
+	v := ctx.CompileString(helperRuleSchema)
+	if err := v.Err(); err != nil {
 		t.Fatal(err)
+	}
+	agree := func(t *testing.T, schema string, def cue.Value, value any, valid bool) {
+		t.Helper()
+		cueErr := def.Unify(ctx.Encode(value)).Validate(cue.Concrete(true))
+		if (cueErr == nil) != valid {
+			t.Fatalf("CUE valid = %v, want %v (%v); the case itself is wrong", cueErr == nil, valid, cueErr)
+		}
+		s := schemas[schema]
+		if s == nil {
+			t.Fatalf("%s is missing from the generated document", schema)
+		}
+		if oaErr := s.Value.VisitJSON(value); (oaErr == nil) != valid {
+			t.Errorf("%s: OpenAPI valid = %v, CUE valid = %v:\n%v", schema, oaErr == nil, valid, oaErr)
+		}
+	}
+	uses := map[string]struct{ helper, list string }{
+		"Log":  {"#_LogStrict", "logs"},
+		"Pair": {"#_PairStrict", "pairs"},
 	}
 
 	tests := []struct {
 		name  string
-		doc   map[string]any
+		base  string
+		entry map[string]any
 		valid bool
 	}{
-		{"executed with start and source", map[string]any{"logs": []any{map[string]any{"result": "Passed", "start": "t", "source": map[string]any{"id": "s"}}}}, true},
-		{"executed without start", map[string]any{"logs": []any{map[string]any{"result": "Passed", "source": map[string]any{"id": "s"}}}}, false},
-		{"not run without start", map[string]any{"logs": []any{map[string]any{"result": "Not Run", "source": map[string]any{"id": "s"}}}}, true},
-		{"neither payload nor source", map[string]any{"logs": []any{map[string]any{"result": "Not Run"}}}, false},
-		{"payload without source", map[string]any{"logs": []any{map[string]any{"result": "Not Run", "payload": "p"}}}, true},
-		{"link without targets", map[string]any{"pairs": []any{map[string]any{"kind": "link"}}}, false},
-		{"link with targets", map[string]any{"pairs": []any{map[string]any{"kind": "link", "targets": []any{map[string]any{"id": "t"}}}}}, true},
-		{"none without targets", map[string]any{"pairs": []any{map[string]any{"kind": "none"}}}, true},
-		// #Log is not strict in CUE, so the base schema must not gain the rules.
-		{"base type stays lenient", map[string]any{"plain": []any{map[string]any{"result": "Passed"}}}, true},
+		{"executed with start and source", "Log", map[string]any{"result": "Passed", "start": "t", "source": map[string]any{"id": "s"}}, true},
+		{"executed without start", "Log", map[string]any{"result": "Passed", "source": map[string]any{"id": "s"}}, false},
+		{"not run without start", "Log", map[string]any{"result": "Not Run", "source": map[string]any{"id": "s"}}, true},
+		{"unknown without start", "Log", map[string]any{"result": "Unknown", "source": map[string]any{"id": "s"}}, true},
+		{"failed without start", "Log", map[string]any{"result": "Failed", "source": map[string]any{"id": "s"}}, false},
+		{"neither payload nor source", "Log", map[string]any{"result": "Not Run"}, false},
+		{"payload without source", "Log", map[string]any{"result": "Not Run", "payload": "p"}, true},
+		{"link without targets", "Pair", map[string]any{"kind": "link"}, false},
+		{"link with targets", "Pair", map[string]any{"kind": "link", "targets": []any{map[string]any{"id": "t"}}}, true},
+		{"none without targets", "Pair", map[string]any{"kind": "none"}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cueErr := def.Unify(ctx.Encode(tt.doc)).Validate(cue.Concrete(true))
-			if (cueErr == nil) != tt.valid {
-				t.Fatalf("CUE valid = %v, want %v (%v); the case itself is wrong", cueErr == nil, tt.valid, cueErr)
-			}
-			oaErr := schema.Value.VisitJSON(tt.doc)
-			if (oaErr == nil) != tt.valid {
-				t.Errorf("OpenAPI valid = %v, CUE valid = %v:\n%v", oaErr == nil, tt.valid, oaErr)
-			}
+			use := uses[tt.base]
+			agree(t, tt.base, hiddenDef(t, v, use.helper), tt.entry, tt.valid)
+			agree(t, "Doc", v.LookupPath(cue.ParsePath("#Doc")), map[string]any{use.list: []any{tt.entry}}, tt.valid)
 		})
 	}
 }
@@ -274,6 +290,30 @@ func TestHelperRulesSkipUnfaithfulProjections(t *testing.T) {
 			helper:     `k: #K` + "\n\t" + `if k != "x" { f: #S }`,
 			wantReason: "#S is satisfied without data",
 		},
+		{
+			name:       "required field with a default",
+			base:       `k: #K, f?: *"d" | #E @gemara(default="d")`,
+			helper:     `k: #K` + "\n\t" + `if k != "x" { f: #E }`,
+			wantReason: "f has a default in #B",
+		},
+		{
+			name:       "base list may be empty",
+			base:       `k: #K, l?: [...#T]`,
+			helper:     `k: #K` + "\n\t" + `if k != "x" { l: [#T, ...#T] }`,
+			wantReason: "#B declares l differently",
+		},
+		{
+			name:       "nullable base list",
+			base:       `k: #K, l?: [#T, ...#T] | null`,
+			helper:     `k: #K` + "\n\t" + `if k != "x" { l: [#T, ...#T] }`,
+			wantReason: "#B declares l differently",
+		},
+		{
+			name:       "base field is not a list",
+			base:       `k: #K, l?: #T`,
+			helper:     `k: #K` + "\n\t" + `if k != "x" { l: [#T, ...#T] }`,
+			wantReason: "#B declares l differently",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -284,6 +324,7 @@ package p
 #T: {id: string}
 #K: "x" | "y"
 #D: *"d" | "e"
+#E: "d" | "e"
 #S: {note?: string}
 #B: {` + tt.base + `}
 #_BStrict: {
@@ -293,81 +334,202 @@ package p
 }
 #Doc: {bs?: [#_BStrict, ...#_BStrict]}
 `
-			dir := writeSourceModule(t, src)
-			v, info, _, err := loadPrepared(dir)
-			if err != nil {
-				t.Fatal(err)
-			}
-			raw, err := generateRaw(v, "test", "test")
-			if err != nil {
-				t.Fatal(err)
-			}
-			skipped, err := applyHelperRulesTyped(raw, info.HelperRules, v)
-			if err != nil {
-				t.Fatal(err)
-			}
+			skipped := skippedRules(t, src)
 			if len(skipped) != 1 || !strings.Contains(skipped[0], tt.wantReason) {
 				t.Fatalf("skipped = %q, want one note containing %q", skipped, tt.wantReason)
 			}
+			requireNoRules(t, src, "B")
+		})
+	}
+}
 
-			doc, err := convertSource(t, src)
-			if err != nil {
-				t.Fatalf("generation must not fail on a rule it cannot project: %v", err)
+// Every helper of a base collapses onto it, so with two helpers a rule on the
+// base would also bind the other helper's uses. Neither rule is projected.
+func TestHelperRulesSkipASharedBase(t *testing.T) {
+	src := `@gemara(status="stable")
+
+package p
+
+#T: {id: string}
+#K: "x" | "y"
+#B: {k: #K, f?: #T, g?: #T}
+#_BStrict: {
+	@go(-)
+} & #B & {
+	k: #K
+	if k != "x" { f: #T }
+}
+#_BOther: {
+	@go(-)
+} & #B & {
+	k: #K
+	if k != "y" { g: #T }
+}
+#Doc: {
+	strict?: [#_BStrict, ...#_BStrict]
+	other?: [#_BOther, ...#_BOther]
+}
+`
+	skipped := skippedRules(t, src)
+	if len(skipped) != 2 {
+		t.Fatalf("skipped = %q, want both rules", skipped)
+	}
+	for _, s := range skipped {
+		if !strings.Contains(s, "#B is extended by more than one helper") {
+			t.Errorf("skipped %q for the wrong reason", s)
+		}
+	}
+	requireNoRules(t, src, "B")
+}
+
+// The repository's bad fixtures for the three strict helpers must now be
+// rejected by the generated document too, and only for the rule's field. The
+// entry that breaks the rule is rejected on its own as well, by its base
+// schema.
+func TestStrictHelperBadFixturesFailTheDocument(t *testing.T) {
+	doc := generatedDocument(t)
+	// A new required field on #AssessmentLog, #Evidence or #Mapping also has to
+	// be added to these fixtures, or they fail here for the wrong reason.
+	tests := []struct {
+		file, schema, base string
+		entry              func(*testing.T, map[string]any) map[string]any // the entry that breaks the rule
+		fix                func(map[string]any)                            // adds what the rule asks for
+	}{
+		{
+			"test/test-data/bad-evaluation-log-missing-start.yaml", "EvaluationLog", "AssessmentLog",
+			func(t *testing.T, d map[string]any) map[string]any {
+				return first(t, first(t, d["evaluations"], "evaluations")["assessment-logs"], "assessment-logs")
+			},
+			func(e map[string]any) { e["start"] = "2025-08-22T16:01:00Z" },
+		},
+		{
+			"test/test-data/bad-audit-log-evidence-neither.yaml", "AuditLog", "Evidence",
+			func(t *testing.T, d map[string]any) map[string]any {
+				for _, r := range sliceOf(d["results"]) {
+					for _, e := range sliceOf(mapOf(r)["evidence"]) {
+						if ev := mapOf(e); ev["payload"] == nil && ev["source"] == nil {
+							return ev
+						}
+					}
+				}
+				t.Fatal("the fixture has no evidence without payload and source")
+				return nil
+			},
+			func(e map[string]any) { e["payload"] = "inline evidence" },
+		},
+		{
+			"test/test-data/bad-mapping-no-target.yaml", "MappingDocument", "Mapping",
+			func(t *testing.T, d map[string]any) map[string]any { return first(t, d["mappings"], "mappings") },
+			func(e map[string]any) { e["targets"] = []any{map[string]any{"entry-id": "T1"}} },
+		},
+	}
+	for _, tt := range tests {
+		t.Run(filepath.Base(tt.file), func(t *testing.T) {
+			value := jsonValue(t, filepath.Join("../../../..", tt.file))
+			entry := tt.entry(t, mapOf(value))
+			checks := []struct {
+				schema string
+				value  any
+			}{{tt.schema, value}, {tt.base, entry}}
+			for _, c := range checks {
+				if err := doc.Components.Schemas[c.schema].Value.VisitJSON(c.value); err == nil {
+					t.Errorf("the CUE rejects this but %s accepts it", c.schema)
+				}
 			}
-			items, err := doc.Components.Schemas["Doc"].Value.Properties["bs"].Value.Items.MarshalJSON()
-			if err != nil {
-				t.Fatal(err)
-			}
-			if strings.Contains(string(items), "anyOf") {
-				t.Errorf("the skipped rule was projected anyway: %s", items)
+			tt.fix(entry)
+			for _, c := range checks {
+				if err := doc.Components.Schemas[c.schema].Value.VisitJSON(c.value); err != nil {
+					t.Errorf("after supplying the rule's field %s still rejects it, so it failed for another reason:\n%v", c.schema, err)
+				}
 			}
 		})
 	}
 }
 
-// The repository's bad fixtures for the three strict helpers must now be
-// rejected by the generated document too, and only for the rule's field.
-func TestStrictHelperBadFixturesFailTheDocument(t *testing.T) {
+// The start rule must still accept the logs it exempts. The good fixture for
+// it has Not Run, Unknown and Not Applicable logs without start, but it is in
+// knownFixtureGaps because the CUE fills each log's requirement.reference-id
+// from its control, so this supplies that the same way before checking.
+func TestStrictHelperGoodFixturePassesTheDocument(t *testing.T) {
+	doc := generatedDocument(t)
+	value := mapOf(jsonValue(t, "../../../../test/test-data/good-evaluation-log-unstarted.yaml"))
+	for _, e := range sliceOf(value["evaluations"]) {
+		evaluation := mapOf(e)
+		for _, l := range sliceOf(evaluation["assessment-logs"]) {
+			log := mapOf(l)
+			mapOf(log["requirement"])["reference-id"] = mapOf(evaluation["control"])["reference-id"]
+			if err := doc.Components.Schemas["AssessmentLog"].Value.VisitJSON(log); err != nil {
+				t.Errorf("AssessmentLog rejects the %v log:\n%v", log["result"], err)
+			}
+		}
+	}
+	if err := doc.Components.Schemas["EvaluationLog"].Value.VisitJSON(value); err != nil {
+		t.Errorf("EvaluationLog rejects the fixture:\n%v", err)
+	}
+}
+
+// generatedDocument generates the repository's schema and loads it the way a
+// consumer of openapi.yaml would.
+func generatedDocument(t *testing.T) *openapi3.T {
+	t.Helper()
 	out := filepath.Join(t.TempDir(), "projection.yaml")
 	writeGenerated(t, out, "", "")
 	doc, err := openapi3.NewLoader().LoadFromFile(out)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A new required field on #AssessmentLog, #Evidence or #Mapping also has to
-	// be added to these fixtures, or they fail here for the wrong reason.
-	tests := []struct {
-		file, schema string
-		fix          func(*testing.T, map[string]any) // adds what the rule asks for
-	}{
-		{"test/test-data/bad-evaluation-log-missing-start.yaml", "EvaluationLog", func(t *testing.T, d map[string]any) {
-			evaluation := first(t, d["evaluations"], "evaluations")
-			first(t, evaluation["assessment-logs"], "assessment-logs")["start"] = "2025-08-22T16:01:00Z"
-		}},
-		{"test/test-data/bad-audit-log-evidence-neither.yaml", "AuditLog", func(t *testing.T, d map[string]any) {
-			for _, r := range sliceOf(d["results"]) {
-				for _, e := range sliceOf(mapOf(r)["evidence"]) {
-					mapOf(e)["payload"] = "inline evidence"
-				}
-			}
-		}},
-		{"test/test-data/bad-mapping-no-target.yaml", "MappingDocument", func(t *testing.T, d map[string]any) {
-			first(t, d["mappings"], "mappings")["targets"] = []any{map[string]any{"entry-id": "T1"}}
-		}},
+	return doc
+}
+
+// skippedRules runs the helper-rule pass alone on the document generated from
+// src, and returns its notes on the rules it left out.
+func skippedRules(t *testing.T, src string) []string {
+	t.Helper()
+	v, info, _, err := loadPrepared(writeSourceModule(t, src))
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, tt := range tests {
-		t.Run(filepath.Base(tt.file), func(t *testing.T) {
-			schema := doc.Components.Schemas[tt.schema]
-			value := jsonValue(t, filepath.Join("../../../..", tt.file))
-			if err := schema.Value.VisitJSON(value); err == nil {
-				t.Fatal("the CUE rejects this fixture but the generated document accepts it")
-			}
-			tt.fix(t, mapOf(value))
-			if err := schema.Value.VisitJSON(value); err != nil {
-				t.Errorf("after supplying the rule's field the document still rejects it, so it failed for another reason:\n%v", err)
-			}
-		})
+	raw, err := generateRaw(v, "test", "test")
+	if err != nil {
+		t.Fatal(err)
 	}
+	skipped, err := applyHelperRulesTyped(raw, info.HelperRules, v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return skipped
+}
+
+// requireNoRules fails unless generation succeeds on src and leaves schema
+// without a projected rule.
+func requireNoRules(t *testing.T, src, schema string) {
+	t.Helper()
+	doc, err := convertSource(t, src)
+	if err != nil {
+		t.Fatalf("generation must not fail on a rule it cannot project: %v", err)
+	}
+	for _, branch := range doc.Components.Schemas[schema].Value.AllOf {
+		if branch.Value != nil && len(branch.Value.AnyOf) > 0 {
+			t.Errorf("a skipped rule was projected onto %s anyway", schema)
+		}
+	}
+}
+
+// hiddenDef returns the hidden definition name in v; cue.ParsePath does not
+// accept hidden labels.
+func hiddenDef(t *testing.T, v cue.Value, name string) cue.Value {
+	t.Helper()
+	iter, err := v.Fields(cue.Hidden(true), cue.Definitions(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for iter.Next() {
+		if iter.Selector().String() == name {
+			return iter.Value()
+		}
+	}
+	t.Fatalf("%s is not defined", name)
+	return cue.Value{}
 }
 
 // first returns the first element of a fixture list as a map.

@@ -175,12 +175,13 @@ func (c *Converter) applyHelperRules(doc *openapi3.T) error {
 	return nil
 }
 
-// applyHelperRulesTyped attaches each translated helper rule wherever its
-// helper is referenced, as an extra allOf branch beside the reference. It must
-// run before collapseHelperSchemasTyped: once a reference to
-// #_AssessmentLogStrict has been rewritten to #AssessmentLog, nothing records
-// that the rule applied there. The rule is not added to the base schema,
-// because the base definition does not carry it in CUE either.
+// applyHelperRulesTyped attaches each translated helper rule to the schema the
+// helper extends, as an extra allOf branch. The helpers only exist because Go
+// code generation cannot handle conditionals, so their rules are the base
+// type's real rules: an AssessmentLog without a start time is just as invalid
+// on its own. collapseHelperSchemasTyped then points every use of a helper at
+// that base, so the uses carry the rules too. It must run before the collapse,
+// which deletes the helper schemas this reads.
 //
 // A rule that would not mean exactly what the CUE means is left out, and
 // returned as a note, so generation never fails on account of a rule it could
@@ -193,51 +194,47 @@ func applyHelperRulesTyped(doc *openapi3.T, rules map[string][]helperRule, v cue
 	if err != nil {
 		return nil, err
 	}
+	bases, err := helperBases(doc.Components.Schemas)
+	if err != nil {
+		return nil, err
+	}
+	helpersPerBase := map[string]int{}
+	for _, base := range bases {
+		helpersPerBase[base]++
+	}
 	var skipped []string
-	byRef := map[string][]helperRule{}
+	byBase := map[string][]helperRule{}
 	for helper, hr := range rules {
+		base, emitted := bases[helper]
 		for _, r := range hr {
-			if reason := unprojectableReason(doc.Components.Schemas, v, defaults, helper, r); reason != "" {
+			var reason string
+			switch {
+			case !emitted:
+				reason = "the encoder emitted no schema for it"
+			case helpersPerBase[base] > 1:
+				// Every helper of a base collapses onto it, so a rule placed
+				// there would also bind the uses of the others.
+				reason = fmt.Sprintf("#%s is extended by more than one helper", base)
+			default:
+				reason = unprojectableReason(doc.Components.Schemas, v, defaults, base, r)
+			}
+			if reason != "" {
 				skipped = append(skipped, fmt.Sprintf("%s: #%s: %s", r.pos, helper, reason))
 				continue
 			}
-			byRef[refPrefix+helper] = append(byRef[refPrefix+helper], r)
+			byBase[base] = append(byBase[base], r)
 		}
 	}
 	slices.Sort(skipped)
-	return skipped, walkOpenAPISchemas(doc, func(s *openapi3.Schema) error {
-		var extra openapi3.SchemaRefs
-		for _, branch := range s.AllOf {
-			extra = append(extra, helperRuleBranches(byRef[branch.Ref])...)
-		}
-		s.AllOf = append(s.AllOf, extra...)
-		s.Items = withHelperRules(s.Items, byRef)
-		for name, p := range s.Properties {
-			s.Properties[name] = withHelperRules(p, byRef)
-		}
-		for i, branch := range s.AnyOf {
-			s.AnyOf[i] = withHelperRules(branch, byRef)
-		}
-		for i, branch := range s.OneOf {
-			s.OneOf[i] = withHelperRules(branch, byRef)
-		}
-		return nil
-	})
-}
-
-// withHelperRules wraps a bare reference to a helper with rules as
-// allOf [reference, rules...]; any other schema is returned unchanged.
-func withHelperRules(ref *openapi3.SchemaRef, byRef map[string][]helperRule) *openapi3.SchemaRef {
-	if ref == nil || len(byRef[ref.Ref]) == 0 {
-		return ref
+	for base, hr := range byBase {
+		s := doc.Components.Schemas[base].Value
+		s.AllOf = append(s.AllOf, helperRuleBranches(hr)...)
 	}
-	return &openapi3.SchemaRef{Value: &openapi3.Schema{
-		AllOf: append(openapi3.SchemaRefs{ref}, helperRuleBranches(byRef[ref.Ref])...),
-	}}
+	return skipped, nil
 }
 
-// helperRuleBranches renders rules as fresh allOf branches, one per use site,
-// so later passes never see one schema shared between two places.
+// helperRuleBranches renders each rule as an allOf branch that passes when the
+// rule's condition does not hold or its field is present.
 func helperRuleBranches(rules []helperRule) openapi3.SchemaRefs {
 	var out openapi3.SchemaRefs
 	for _, r := range rules {
@@ -259,18 +256,10 @@ func helperRuleBranches(rules []helperRule) openapi3.SchemaRefs {
 	return out
 }
 
-// unprojectableReason returns why projecting r as "subject absent, or one of
-// values; otherwise field required" would not say what the CUE says, or ""
-// when it would.
-func unprojectableReason(schemas openapi3.Schemas, v cue.Value, defaults map[string]any, helper string, r helperRule) string {
-	h := schemas[helper]
-	if h == nil || h.Value == nil {
-		return "the encoder emitted no schema for it"
-	}
-	base, err := typedPassthroughBase(helper, h.Value, schemas)
-	if err != nil {
-		return err.Error()
-	}
+// unprojectableReason returns why projecting r onto base as "subject absent,
+// or one of values; otherwise field required" would not say what the CUE
+// says, or "" when it would.
+func unprojectableReason(schemas openapi3.Schemas, v cue.Value, defaults map[string]any, base string, r helperRule) string {
 	props, required, err := typedResolved(base, schemas, map[string]bool{})
 	if err != nil {
 		return err.Error()
